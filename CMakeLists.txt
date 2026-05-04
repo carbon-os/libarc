@@ -26,6 +26,6 @@ add_subdirectory(host)
 add_subdirectory(arc-host)
 
 # ── Integrations ──────────────────────────────────────────────────────────────
-if(APPLE)
+if(APPLE OR WIN32)
     add_subdirectory(integrations/billing)
 endif()

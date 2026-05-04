@@ -26,15 +26,14 @@ namespace ui {
 gboolean View::Impl::on_size_allocate(GtkWidget* widget, GdkRectangle* alloc, gpointer data) {
     auto* impl = static_cast<Impl*>(data);
     if (impl->cb_resize) impl->cb_resize({alloc->width, alloc->height});
-    // Move is handled via parent fixed container
     return FALSE;
 }
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
 View::View(Window& parent, ViewConfig config) : impl_(std::make_unique<Impl>()) {
-    impl_->view = gtk_event_box_new(); // Event box allows drawing backgrounds and capturing events
-    
+    impl_->view = gtk_event_box_new();
+
     impl_->min_size = config.min_size;
     impl_->max_size = config.max_size;
 
@@ -104,9 +103,65 @@ void View::focus() { gtk_widget_grab_focus(impl_->view); }
 bool View::is_visible() const { return gtk_widget_get_visible(impl_->view); }
 bool View::is_focused() const { return gtk_widget_has_focus(impl_->view); }
 
+// ── Stacking ──────────────────────────────────────────────────────────────────
+
+void View::bring_to_front() {
+    // GtkFixed has no Z-order API; re-inserting the widget last in the
+    // parent's child list achieves the same effect in the GTK paint order.
+    GtkWidget* parent = gtk_widget_get_parent(impl_->view);
+    if (!GTK_IS_FIXED(parent)) return;
+
+    // Read the current position so we can preserve it after re-parenting.
+    GValue x_val = G_VALUE_INIT, y_val = G_VALUE_INIT;
+    g_value_init(&x_val, G_TYPE_INT);
+    g_value_init(&y_val, G_TYPE_INT);
+    gtk_container_child_get_property(GTK_CONTAINER(parent), impl_->view, "x", &x_val);
+    gtk_container_child_get_property(GTK_CONTAINER(parent), impl_->view, "y", &y_val);
+    gint x = g_value_get_int(&x_val);
+    gint y = g_value_get_int(&y_val);
+
+    // Hold a ref so the widget survives being removed.
+    g_object_ref(impl_->view);
+    gtk_container_remove(GTK_CONTAINER(parent), impl_->view);
+    gtk_fixed_put(GTK_FIXED(parent), impl_->view, x, y);
+    g_object_unref(impl_->view);
+}
+
+void View::send_to_back() {
+    GtkWidget* parent = gtk_widget_get_parent(impl_->view);
+    if (!GTK_IS_FIXED(parent)) return;
+
+    GValue x_val = G_VALUE_INIT, y_val = G_VALUE_INIT;
+    g_value_init(&x_val, G_TYPE_INT);
+    g_value_init(&y_val, G_TYPE_INT);
+    gtk_container_child_get_property(GTK_CONTAINER(parent), impl_->view, "x", &x_val);
+    gtk_container_child_get_property(GTK_CONTAINER(parent), impl_->view, "y", &y_val);
+    gint x = g_value_get_int(&x_val);
+    gint y = g_value_get_int(&y_val);
+
+    // Re-insert first by temporarily reparenting, then moving to front of
+    // the child list with gtk_box / GtkFixed doesn't expose a direct
+    // "insert at index 0" API, so we reorder via gdk_window_lower instead.
+    GdkWindow* gdk_win = gtk_widget_get_window(impl_->view);
+    if (gdk_win) {
+        gdk_window_lower(gdk_win);
+    } else {
+        // Widget not yet realized — remove and re-insert at head by
+        // doing a full reparent before all existing siblings.
+        g_object_ref(impl_->view);
+        gtk_container_remove(GTK_CONTAINER(parent), impl_->view);
+        gtk_fixed_put(GTK_FIXED(parent), impl_->view, x, y);
+        // Lower immediately once realized.
+        gtk_widget_realize(impl_->view);
+        GdkWindow* win = gtk_widget_get_window(impl_->view);
+        if (win) gdk_window_lower(win);
+        g_object_unref(impl_->view);
+    }
+}
+
 // ── Appearance ────────────────────────────────────────────────────────────────
 
-void View::set_effect(BackdropEffect effect) { /* Native blur backdrops unsupported */ }
+void View::set_effect(BackdropEffect effect) { /* Native blur backdrops unsupported in GTK3 */ }
 void View::clear_effect() { }
 
 // ── Events ────────────────────────────────────────────────────────────────────

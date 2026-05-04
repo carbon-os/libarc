@@ -38,18 +38,14 @@ static void register_view_class() {
         wc.lpfnWndProc   = ui::View::Impl::WndProc;
         wc.hInstance     = GetModuleHandleW(nullptr);
         wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = nullptr;           // caller controls background
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = L"libui_View";
         RegisterClassExW(&wc);
     });
 }
 
-// ── Backdrop helper (window-level effects don't propagate to child HWNDs;
-//    Acrylic / Mica require the top-level window to own the effect.
-//    For View we apply a DWM blur-behind as a best-effort visual.) ────────────
+// ── Backdrop helper ───────────────────────────────────────────────────────────
 static void apply_view_effect(HWND hwnd, ui::BackdropEffect /*effect*/) {
-    // Child-window backdrop is not supported natively on Windows outside of
-    // the top-level DWM frame.  Enable blur-behind as a generic indicator.
     DWM_BLURBEHIND bb = {};
     bb.dwFlags  = DWM_BB_ENABLE;
     bb.fEnable  = TRUE;
@@ -88,7 +84,6 @@ LRESULT CALLBACK View::Impl::WndProc(HWND hwnd, UINT msg,
 
         case WM_MOVE: {
             if (!impl || !impl->cb_move) break;
-            // Positions are relative to the parent client area.
             impl->cb_move({ (int)(short)LOWORD(lParam),
                             (int)(short)HIWORD(lParam) });
             return 0;
@@ -119,7 +114,6 @@ LRESULT CALLBACK View::Impl::WndProc(HWND hwnd, UINT msg,
         }
 
         case WM_ERASEBKGND:
-            // Suppress to avoid white flash; WM_PAINT handles drawing.
             return 1;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -200,7 +194,6 @@ void View::set_position(Point point) {
 Point View::get_position() const {
     RECT rc;
     GetWindowRect(impl_->hwnd, &rc);
-    // Convert from screen to parent-client coordinates.
     HWND parent = GetParent(impl_->hwnd);
     POINT pt = { rc.left, rc.top };
     if (parent) ScreenToClient(parent, &pt);
@@ -218,6 +211,20 @@ void View::focus() { SetFocus(impl_->hwnd); }
 
 bool View::is_visible() const { return IsWindowVisible(impl_->hwnd) != FALSE; }
 bool View::is_focused()  const { return GetFocus() == impl_->hwnd; }
+
+// ── Stacking ──────────────────────────────────────────────────────────────────
+
+void View::bring_to_front() {
+    SetWindowPos(impl_->hwnd, HWND_TOP,
+                 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void View::send_to_back() {
+    SetWindowPos(impl_->hwnd, HWND_BOTTOM,
+                 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 // ── Appearance ────────────────────────────────────────────────────────────────
 
