@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- ── Hardened runtime ───────────────────────────────────────────────── -->
+
+    <!-- Required for WKWebView's JS engine (JIT compilation) -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Required if you load dylibs not signed by Apple or yourself -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- ── Network ───────────────────────────────────────────────────────── -->
+
+    <!-- Required for the WebKit inspector's internal devtools protocol server -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Enable only if your app listens on a socket (IPC server, etc.) -->
+    <!-- <key>com.apple.security.network.server</key> -->
+    <!-- <true/> -->
+
+    <!-- ── Sandbox (choose one) ──────────────────────────────────────────── -->
+
+    <!-- Option A: sandboxed (App Store / notarized distribution) -->
+    <!-- <key>com.apple.security.app-sandbox</key> -->
+    <!-- <true/> -->
+
+    <!-- Option B: not sandboxed (direct distribution / development) -->
+    <!-- Leave the key absent entirely. -->
+
+    <!-- ── File access (only needed when sandboxed) ───────────────────────── -->
+
+    <!-- Read/write access to files the user opens via dialog -->
+    <!-- <key>com.apple.security.files.user-selected.read-write</key> -->
+    <!-- <true/> -->
+
+    <!-- Read/write access to the Downloads folder -->
+    <!-- <key>com.apple.security.files.downloads.read-write</key> -->
+    <!-- <true/> -->
+
+    <!-- ── Shared memory ──────────────────────────────────────────────────── -->
+
+    <!-- POSIX shm_open / mmap used by PixelView's pixel channel.             -->
+    <!-- No explicit entitlement key is needed for POSIX shared memory on     -->
+    <!-- macOS — it works under the hardened runtime as long as the process   -->
+    <!-- is not fully sandboxed.  If you later enable the sandbox you will    -->
+    <!-- need a temporary-exception entitlement here.                         -->
+
+    <!-- ── Webview devtools ───────────────────────────────────────────────── -->
+
+    <!-- Allows _WKInspector to attach and render the inspector panel.        -->
+    <!-- This is a private entitlement; it works in development/ad-hoc       -->
+    <!-- builds but Apple will reject App Store submissions that include it.  -->
+    <!-- Strip this key before submitting to the Mac App Store.               -->
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+
+</dict>
+</plist>

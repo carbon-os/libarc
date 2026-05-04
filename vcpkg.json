@@ -1,0 +1,8 @@
+{
+  "name": "libarc",
+  "version-semver": "2.0.0",
+  "dependencies": [
+    "nlohmann-json",
+    { "name": "webview2", "platform": "windows" }
+  ]
+}
