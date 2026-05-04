@@ -16,10 +16,13 @@ class PurchaseIntentListener {
         task = Task(priority: .background) { [weak self] in
             for await intent in PurchaseIntent.intents {
                 let productId = intent.product.id
+                // Fix 9: capture a strong reference via guard-let before crossing
+                // into MainActor — capturing 'var self' directly is an error in Swift 6.
+                guard let self else { return }
                 await MainActor.run {
                     // If the caller returns false they're deferring —
                     // they're expected to call purchase() themselves when ready.
-                    let _ = self?.onIntent?(productId)
+                    let _ = self.onIntent?(productId)
                 }
             }
         }

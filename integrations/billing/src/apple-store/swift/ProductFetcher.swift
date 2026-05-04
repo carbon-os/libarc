@@ -6,8 +6,10 @@ import Foundation
 @available(macOS 12.0, *)
 class ProductFetcher {
 
-    // Raw SK products kept alive so PurchaseHandler can call product.purchase()
-    private(set) var skProductCache: [String: Product] = [:]
+    // Fix 6: removed private(set) so StoreBridge can reset the cache in
+    // registerProductIds(). The cache is internal plumbing with a single
+    // external consumer (StoreBridge), so restricting the setter adds no value.
+    var skProductCache: [String: Product] = [:]
 
     func fetch(ids: [String]) async -> (products: [BillingProduct], error: Error?) {
         do {

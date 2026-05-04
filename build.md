@@ -42,11 +42,18 @@ git clone https://github.com/microsoft/vcpkg.git
 
 ---
 
+**macOS Deps**
+```bash
+brew install ninja
+
+brew upgrade cmake
+```
+
 ## 4 — Configure with CMake
 
 **macOS / Linux**
 ```bash
-cmake -B build \
+cmake -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
 ```

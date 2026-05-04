@@ -16,7 +16,10 @@ class EntitlementManager {
             // Transaction.updates is an AsyncSequence that emits on renewals,
             // cancellations, billing failures, refunds, Family Share changes, etc.
             for await _ in Transaction.updates {
-                await MainActor.run { self?.onEntitlementsChanged?() }
+                // Fix 8: capture a strong reference via guard-let before crossing
+                // into MainActor — capturing 'var self' directly is an error in Swift 6.
+                guard let self else { return }
+                await MainActor.run { self.onEntitlementsChanged?() }
             }
         }
     }

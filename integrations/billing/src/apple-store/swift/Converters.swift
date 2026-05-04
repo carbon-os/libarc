@@ -73,8 +73,9 @@ enum Converters {
 
         if case .verified(let renewal) = status.renewalInfo {
             willAutoRenew = renewal.willAutoRenew
-            if renewal.autoRenewProductID != latestTx.productID {
-                renewProductId = renewal.autoRenewProductID
+            // Fix 1: renamed from autoRenewProductID → autoRenewPreference
+            if renewal.autoRenewPreference != latestTx.productID {
+                renewProductId = renewal.autoRenewPreference
             }
             if let r = renewal.expirationReason {
                 hasExpReason = true
@@ -120,11 +121,12 @@ enum Converters {
 
     static func offer(from sk: Product.SubscriptionOffer, as type: BillingOfferType) -> BillingOffer {
         let mode: BillingPaymentMode
+        // Fix 2: new known cases added to paymentMode — drop @unknown, use plain default
         switch sk.paymentMode {
         case .freeTrial:  mode = .freeTrial
         case .payAsYouGo: mode = .payAsYouGo
         case .payUpFront: mode = .payUpFront
-        @unknown default: mode = .freeTrial
+        default:          mode = .freeTrial
         }
         return BillingOffer(
             offerId:      sk.id ?? "",
@@ -138,11 +140,12 @@ enum Converters {
     @available(macOS 14.4, *)
     static func offer(fromTxOffer tx: Transaction.Offer) -> BillingOffer {
         let type: BillingOfferType
+        // Fix 3: Transaction.OfferType cases dropped the "Offer" suffix
         switch tx.type {
-        case .introductoryOffer: type = .introductory
-        case .promotionalOffer:  type = .promotional
-        case .winBackOffer:      type = .winBack
-        @unknown default:        type = .promotional
+        case .introductory: type = .introductory
+        case .promotional:  type = .promotional
+        case .winBack:      type = .winBack
+        default:            type = .promotional
         }
         let mode: BillingPaymentMode
         switch tx.paymentMode {
@@ -165,25 +168,27 @@ enum Converters {
     static func subscriptionState(
         from state: Product.SubscriptionInfo.RenewalState
     ) -> BillingSubscriptionState {
+        // Fix 2: new known cases added to RenewalState — drop @unknown, use plain default
         switch state {
         case .subscribed:            return .active
         case .expired:               return .expired
         case .inBillingRetryPeriod:  return .inBillingRetry
         case .inGracePeriod:         return .inBillingGracePeriod
         case .revoked:               return .revoked
-        @unknown default:            return .expired
+        default:                     return .expired
         }
     }
 
     static func expirationReason(
         from reason: Product.SubscriptionInfo.RenewalInfo.ExpirationReason
     ) -> BillingExpirationReason {
+        // Fix 2: new known cases added to ExpirationReason — drop @unknown, use plain default
         switch reason {
-        case .autoRenewDisabled:             return .cancelled
-        case .billingError:                  return .billingError
-        case .didNotConsentToPriceIncrease:  return .priceIncrease
-        case .productUnavailable:            return .productUnavailable
-        @unknown default:                    return .unknown
+        case .autoRenewDisabled:            return .cancelled
+        case .billingError:                 return .billingError
+        case .didNotConsentToPriceIncrease: return .priceIncrease
+        case .productUnavailable:           return .productUnavailable
+        default:                            return .unknown
         }
     }
 }

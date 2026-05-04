@@ -6,13 +6,12 @@ import Foundation
 @available(macOS 12.0, *)
 class PurchaseHandler {
 
-    // Populated by ProductFetcher after a successful fetch
     var skProductCache: [String: Product] = [:]
 
     func purchase(
-        productId: String,
-        offerId: String?,
-        jwsSignature: String?
+        productId:      String,
+        offerId:        String?,
+        offerSignature: BillingOfferSignature?
     ) async -> BillingPurchaseResult {
 
         guard let product = skProductCache[productId] else {
@@ -23,10 +22,24 @@ class PurchaseHandler {
         do {
             var options = Set<Product.PurchaseOption>()
 
-            // Promotional offer with compact JWS — requires macOS 15.4+.
-            // On older OS the purchase proceeds without the offer applied.
-            if #available(macOS 15.4, *), let oid = offerId, let jws = jwsSignature {
-                options.insert(.promotionalOffer(offerID: oid, signature: jws))
+            if let oid = offerId, let sig = offerSignature {
+                if #available(macOS 26.0, *) {
+                    // promotionalOffer(_:compactJWS:) returns [Product.PurchaseOption],
+                    // not a single element. Explicit type required so Swift can resolve
+                    // the static method on formUnion's generic Sequence parameter.
+                    options.formUnion(Product.PurchaseOption.promotionalOffer(oid, compactJWS: sig.jws))
+
+                } else if let nonceUUID = UUID(uuidString: sig.nonce) {
+                    // macOS 15.4–25.x: legacy four-component Signature struct.
+                    let skSig = Product.SubscriptionOffer.Signature(
+                        keyID:     sig.keyID,
+                        nonce:     nonceUUID,
+                        timestamp: Int(sig.timestamp),
+                        signature: sig.signatureBytes
+                    )
+                    options.insert(.promotionalOffer(offerID: oid, signature: skSig))
+                }
+                // Below macOS 15.4: purchase proceeds without the offer applied.
             }
 
             let result = try await product.purchase(options: options)

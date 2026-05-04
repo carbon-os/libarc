@@ -1,10 +1,8 @@
 // billing/include/billing/apple/store.h
-// Pure C++ — libarc and your app code never see Swift or ObjC.
-// Store::Impl is intentionally incomplete here; defined in ShimStore.mm.
-
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -42,9 +40,9 @@ enum class PeriodUnit {
 enum class SubscriptionState {
     Active,
     Expired,
-    InBillingRetry,        // payment failed; Apple retrying — still has access
-    InBillingGracePeriod,  // grace period after billing failure — still has access
-    Revoked,               // Family Share revoked
+    InBillingRetry,
+    InBillingGracePeriod,
+    Revoked,
 };
 
 enum class ExpirationReason {
@@ -79,10 +77,10 @@ struct SubscriptionPeriod {
 };
 
 struct Offer {
-    std::string      id;
-    OfferType        type;
-    OfferPaymentMode payment_mode;
-    std::string      display_price;
+    std::string        id;
+    OfferType          type;
+    OfferPaymentMode   payment_mode;
+    std::string        display_price;
     SubscriptionPeriod period;
 };
 
@@ -107,10 +105,10 @@ struct Transaction {
     std::string  product_id;
     ProductKind  product_kind;
 
-    TimePoint                 purchased_at;
-    std::optional<TimePoint>  expires_at;
-    std::optional<TimePoint>  revoked_at;
-    std::optional<Offer>      redeemed_offer;
+    TimePoint                purchased_at;
+    std::optional<TimePoint> expires_at;
+    std::optional<TimePoint> revoked_at;
+    std::optional<Offer>     redeemed_offer;
 
     bool family_shared = false;
     bool upgraded      = false;
@@ -121,10 +119,10 @@ struct Entitlement {
     SubscriptionState state;
     Transaction       transaction;
 
-    std::optional<TimePoint>          expires_at;
-    std::optional<ExpirationReason>   expiration_reason;
-    bool                              will_auto_renew  = false;
-    std::optional<std::string>        renewal_product_id;
+    std::optional<TimePoint>        expires_at;
+    std::optional<ExpirationReason> expiration_reason;
+    bool                            will_auto_renew = false;
+    std::optional<std::string>      renewal_product_id;
 };
 
 struct PurchaseResult {
@@ -135,11 +133,33 @@ struct PurchaseResult {
     bool ok() const { return !error.has_value(); }
 };
 
-// ── ProductSpec — registration ────────────────────────────────────────────────
+// ── ProductSpec ───────────────────────────────────────────────────────────────
 
 struct ProductSpec {
     std::string product_id;
     ProductKind kind;
+};
+
+// ── OfferSignature ────────────────────────────────────────────────────────────
+// Carries both signing shapes so callers don't need OS version guards:
+//
+//   macOS 26.0+  — populate `jws` with the compact JWS your server returns.
+//                  The four legacy fields are ignored on this OS.
+//
+//   macOS 15.4–25.x — leave `jws` empty and populate the four legacy fields
+//                  with the components your server returns.
+//
+// The Swift layer picks the correct StoreKit API at runtime.
+
+struct OfferSignature {
+    // ── macOS 26.0+ ──────────────────────────────────────────────────────────
+    std::string jws;               // compact JWS token
+
+    // ── macOS 15.4–25.x ──────────────────────────────────────────────────────
+    std::string           key_id;
+    std::string           nonce;            // UUID string, e.g. "a1b2c3d4-..."
+    int64_t               timestamp  = 0;   // Unix milliseconds
+    std::vector<uint8_t>  signature_bytes;  // raw ECDSA bytes, NOT base64
 };
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -147,46 +167,38 @@ struct ProductSpec {
 class Store {
 public:
      Store();
-    ~Store(); // defined in ShimStore.mm — Impl must be complete at destruction
+    ~Store();
 
     Store(const Store&)            = delete;
     Store& operator=(const Store&) = delete;
 
-    // Registration — call before fetch_products()
     void register_products(std::vector<ProductSpec> specs);
 
-    // Async actions — results delivered via event hooks below
     void fetch_products();
+
+    // Provide offer_id + offer_signature together to apply a promotional offer.
+    // Requires macOS 15.4+; silently ignored on earlier OS.
     void purchase(const std::string& product_id,
-                  std::optional<std::string> offer_id          = std::nullopt,
-                  std::optional<std::string> jws_offer_signature = std::nullopt);
+                  std::optional<std::string>    offer_id        = std::nullopt,
+                  std::optional<OfferSignature> offer_signature = std::nullopt);
+
     void restore_purchases();
 
-    // Entitlements — always re-derive from SK2, never cache across launches
     void current_entitlements(std::function<void(std::vector<Entitlement>)> fn);
     void check_entitlement(const std::string& product_id,
                            std::function<void(std::optional<Entitlement>)> fn);
 
-    // Refund — presents Apple's native sheet; requires a visible window
     void request_refund(const std::string& transaction_id,
                         std::function<void(RefundRequestStatus)> fn);
 
-    // Event hooks — all callbacks fire on the main thread
     void on_products_fetched(std::function<void(const std::vector<Product>&)> fn);
     void on_purchase_completed(std::function<void(const PurchaseResult&)> fn);
     void on_restore_completed(std::function<void(const std::vector<PurchaseResult>&)> fn);
-
-    // Fires on any Transaction.updates event (renewals, cancellations, billing
-    // failures, Family Share changes). Re-call current_entitlements() in response.
     void on_entitlements_changed(std::function<void()> fn);
-
-    // Fires when user taps "Buy" on your App Store product page (promoted IAP).
-    // Return false to defer the purchase; call purchase() later when ready.
-    // Requires macOS 14.4+; no-op on earlier OS — registered but never fires.
     void on_promoted_iap(std::function<bool(const std::string& product_id)> fn);
 
 private:
-    struct Impl;                    // defined in ShimStore.mm
+    struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
