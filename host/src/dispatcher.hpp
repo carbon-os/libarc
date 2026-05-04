@@ -7,23 +7,24 @@
 
 #include "registry.hpp"
 
+// BillingManager is only compiled on Apple and Windows.
+#if defined(__APPLE__) || defined(_WIN32)
+#  include "billing_manager.hpp"
+#  include <memory>
+#endif
+
 namespace arc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CommandDispatcher
-//
-// Receives parsed ipc::Messages from arc::Host (already on the main thread),
-// inspects the "type" field, and routes to the appropriate handler.
-//
-// Holds non-owning references to the IPC server (to emit events back to Go)
-// and the registry (to find and mutate managed objects).
-// ─────────────────────────────────────────────────────────────────────────────
 class CommandDispatcher {
 public:
     CommandDispatcher(ipc::Server& server, WindowRegistry& registry);
 
-    // Entry point — called on the main thread for every incoming JSON message.
     void dispatch(const ipc::Message& msg);
+
+#if defined(__APPLE__) || defined(_WIN32)
+    // Called by Host after constructing BillingManager; transfers ownership.
+    void set_billing(std::unique_ptr<BillingManager> billing);
+#endif
 
 private:
     // ── Host ──────────────────────────────────────────────────────────────────
@@ -73,7 +74,6 @@ private:
     void wire_window_events(const std::string& id, ui::Window& win);
     void wire_webview_events(const std::string& id, webview::WebView& wv);
 
-    // Helpers for effect string → enum conversion.
     static std::optional<ui::BackdropEffect> parse_effect(const std::string& name);
 
     void emit(nlohmann::json evt);
@@ -81,6 +81,10 @@ private:
     ipc::Server&    server_;
     WindowRegistry& registry_;
     std::string     app_name_;
+
+#if defined(__APPLE__) || defined(_WIN32)
+    std::unique_ptr<BillingManager> billing_;
+#endif
 };
 
 } // namespace arc

@@ -17,9 +17,10 @@
 #  include <dlfcn.h>
 #endif
 
-// Embedded mode: the module must export this symbol.
-// Host calls it on a detached thread once the IPC server is listening.
-// The module connects back as an ipc::Client using the provided channel_id.
+#if defined(__APPLE__) || defined(_WIN32)
+#  include "billing_manager.hpp"
+#endif
+
 extern "C" typedef void (*AppMainFn)(const char* channel_id);
 
 namespace arc {
@@ -27,7 +28,6 @@ namespace arc {
 namespace {
 
 std::string generate_channel_id() {
-    // Simple unique ID — replace with a UUID library if preferred.
     static std::atomic<uint32_t> counter{0};
     return "arc-" + std::to_string(
         std::chrono::steady_clock::now().time_since_epoch().count()
@@ -43,8 +43,6 @@ struct Host::Impl {
     std::unique_ptr<ipc::Server>       server;
     std::unique_ptr<CommandDispatcher> dispatcher;
 
-    // Invisible sentinel window. Gives the native event loop something to run
-    // against before the controller has created any application windows.
     std::unique_ptr<ui::Window> sentinel;
 };
 
@@ -58,24 +56,18 @@ void Host::run() {
     auto& im = *impl_;
 
     // ── 1. Channel ID ─────────────────────────────────────────────────────────
-    // Embedded mode generates its own ID if the caller didn't supply one.
     if (im.config.mode == HostMode::Embedded && im.config.channel_id.empty())
         im.config.channel_id = generate_channel_id();
 
-    // ── 2. In-process transport registration (embedded mode only) ─────────────
-    // Must happen before constructing ipc::Server so both sides share the
-    // in-process channel rather than a socket or pipe.
+    // ── 2. In-process transport (embedded mode only) ───────────────────────────
     if (im.config.mode == HostMode::Embedded)
         ipc::register_inprocess(im.config.channel_id);
 
-    // ── 3. Construct IPC server and dispatcher ────────────────────────────────
+    // ── 3. IPC server + dispatcher ────────────────────────────────────────────
     im.server     = std::make_unique<ipc::Server>(im.config.channel_id);
     im.dispatcher = std::make_unique<CommandDispatcher>(*im.server, im.registry);
 
-    // ── 4. Wire IPC callbacks → main thread ───────────────────────────────────
-    // libipc delivers all callbacks on its internal I/O thread. Everything
-    // that touches UI state must be marshalled to the main thread first.
-
+    // ── 4. IPC callbacks ──────────────────────────────────────────────────────
     im.server->on_connect([&im]() {
         post_to_main_thread([&im]() {
             im.server->send({ {"type", "host.ready"} });
@@ -83,7 +75,6 @@ void Host::run() {
     });
 
     im.server->on_disconnect([&im]() {
-        // A disconnect is terminal — shut the application down.
         post_to_main_thread([&im]() {
             im.server->stop();
             quit_app();
@@ -96,19 +87,14 @@ void Host::run() {
         });
     });
 
-    im.server->on_error([](ipc::Error /*err*/) {
-        // A transport error will surface as an on_disconnect shortly after.
-    });
+    im.server->on_error([](ipc::Error) {});
 
-    // ── 5. Start accepting connections ────────────────────────────────────────
+    // ── 5. Start listening ────────────────────────────────────────────────────
     im.server->listen();
 
-    // ── 6. Load and start the module (embedded mode only) ─────────────────────
-    // The module receives the channel ID and is expected to connect back as
-    // an ipc::Client. It runs on its own detached thread and must not block.
+    // ── 6. Load module (embedded mode only) ───────────────────────────────────
     if (im.config.mode == HostMode::Embedded && !im.config.module_path.empty()) {
         AppMainFn app_main = nullptr;
-
 #if defined(_WIN32)
         if (HMODULE lib = LoadLibraryA(im.config.module_path.c_str()))
             app_main = reinterpret_cast<AppMainFn>(GetProcAddress(lib, "AppMain"));
@@ -117,20 +103,15 @@ void Host::run() {
             app_main = reinterpret_cast<AppMainFn>(dlsym(lib, "AppMain"));
 #endif
         if (app_main) {
-            const std::string cid = im.config.channel_id; // capture by value
-            std::thread([app_main, cid]() {
-                app_main(cid.c_str());
-            }).detach();
+            const std::string cid = im.config.channel_id;
+            std::thread([app_main, cid]() { app_main(cid.c_str()); }).detach();
         }
     }
 
-    // ── 7. Platform-specific pre-loop setup ───────────────────────────────────
+    // ── 7. Platform dispatch setup ────────────────────────────────────────────
     init_main_thread_dispatch();
 
-    // ── 8. Create the sentinel window and enter the native event loop ─────────
-    // The sentinel is a hidden, zero-content window whose sole purpose is to
-    // keep the event loop alive until the controller creates application windows.
-    // It is never shown to the user.
+    // ── 8. Sentinel window ────────────────────────────────────────────────────
     im.sentinel = std::make_unique<ui::Window>(ui::WindowConfig{
         .title     = "",
         .size      = { 1, 1 },
@@ -139,10 +120,33 @@ void Host::run() {
     });
     im.sentinel->hide();
 
-    // Blocks here until quit_app() terminates the native event loop.
+    // ── 9. Billing manager ────────────────────────────────────────────────────
+    // Constructed after the sentinel so the Windows path can supply a valid
+    // HWND.  The emit lambda calls server::send() which is thread-safe, so
+    // billing callbacks don't need extra marshalling.
+#if defined(__APPLE__)
+    {
+        auto billing = std::make_unique<BillingManager>(
+            [&im](nlohmann::json j) { im.server->send(std::move(j)); });
+        im.dispatcher->set_billing(std::move(billing));
+    }
+#elif defined(_WIN32)
+    {
+        HWND hwnd = nullptr;
+        auto nh   = im.sentinel->native_handle();
+        if (nh.type() == ui::NativeHandleType::HWND)
+            hwnd = reinterpret_cast<HWND>(nh.get());
+
+        auto billing = std::make_unique<BillingManager>(
+            [&im](nlohmann::json j) { im.server->send(std::move(j)); }, hwnd);
+        im.dispatcher->set_billing(std::move(billing));
+    }
+#endif
+
+    // ── 10. Event loop ────────────────────────────────────────────────────────
     im.sentinel->run();
 
-    // ── 9. Teardown ───────────────────────────────────────────────────────────
+    // ── 11. Teardown ──────────────────────────────────────────────────────────
     im.server->stop();
     ipc::unregister_inprocess(im.config.channel_id);
 }

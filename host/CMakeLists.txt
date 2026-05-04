@@ -1,41 +1,48 @@
-cmake_minimum_required(VERSION 3.21)
+# host/CMakeLists.txt
 
 add_library(host STATIC
-    src/host.cpp
-    src/registry.cpp
-    src/dispatcher.cpp
-    src/main_thread.cpp
-)
-
-target_include_directories(host
-    PUBLIC  include
-    PRIVATE src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/host.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dispatcher.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main_thread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/registry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/billing_manager.cpp
 )
 
 target_compile_features(host PUBLIC cxx_std_20)
 
-# nlohmann-json comes from vcpkg — still needs find_package
-find_package(nlohmann_json CONFIG REQUIRED)
-
-# libui, libwebview, libipc are sibling add_subdirectory targets — no find_package
-target_link_libraries(host
-    PUBLIC
-        ui
-        webview
-        ipc
-        nlohmann_json::nlohmann_json
+target_include_directories(host PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+target_link_libraries(host PUBLIC
+    ipc
+    ui
+    webview
+    nlohmann_json::nlohmann_json
+)
+
+# ── Billing integration ───────────────────────────────────────────────────────
 if(APPLE)
-    set_source_files_properties(src/main_thread.cpp PROPERTIES
-        COMPILE_FLAGS "-x objective-c++")
-    target_link_libraries(host PUBLIC
-        "-framework Foundation"
-        "-framework AppKit")
-    target_compile_options(host PRIVATE -fobjc-arc)
-elseif(UNIX)
+    target_link_libraries(host PRIVATE billing_apple)
+elseif(WIN32)
+    target_link_libraries(host PRIVATE billing_windows)
+endif()
+
+# ── macOS: compile main_thread.cpp as Objective-C++ ──────────────────────────
+if(APPLE)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/main_thread.cpp
+        PROPERTIES COMPILE_FLAGS "-x objective-c++ -fobjc-arc"
+    )
+    find_library(FW_FOUNDATION Foundation REQUIRED)
+    find_library(FW_APPKIT     AppKit     REQUIRED)
+    target_link_libraries(host PRIVATE ${FW_FOUNDATION} ${FW_APPKIT})
+endif()
+
+# ── Linux: GTK3 for the event loop ───────────────────────────────────────────
+if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     target_include_directories(host PRIVATE ${GTK3_INCLUDE_DIRS})
-    target_link_libraries(host PRIVATE ${GTK3_LINK_LIBRARIES})
+    target_link_libraries(host PRIVATE ${GTK3_LIBRARIES})
 endif()
