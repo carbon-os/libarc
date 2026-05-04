@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(libarc VERSION 2.0.0 LANGUAGES CXX)
+project(libarc VERSION 2.0.0 LANGUAGES CXX Swift)
 
 # ── macOS deployment target ───────────────────────────────────────────────────
 # Set before any add_subdirectory so all targets inherit it.
@@ -18,3 +18,8 @@ add_subdirectory(ui)
 add_subdirectory(webview)
 add_subdirectory(host)
 add_subdirectory(arc-host)
+
+# ── Integrations ──────────────────────────────────────────────────────────────
+if(APPLE)
+    add_subdirectory(integrations/billing)
+endif()
