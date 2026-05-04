@@ -7,9 +7,13 @@
 
 #include "registry.hpp"
 
-// BillingManager is only compiled on Apple and Windows.
-#if defined(__APPLE__) || defined(_WIN32)
-#  include "billing_manager.hpp"
+#if defined(__APPLE__)
+#  include "apple_store_manager.hpp"
+#  include <memory>
+#endif
+
+#if defined(_WIN32)
+#  include "microsoft_store_manager.hpp"
 #  include <memory>
 #endif
 
@@ -21,9 +25,12 @@ public:
 
     void dispatch(const ipc::Message& msg);
 
-#if defined(__APPLE__) || defined(_WIN32)
-    // Called by Host after constructing BillingManager; transfers ownership.
-    void set_billing(std::unique_ptr<BillingManager> billing);
+#if defined(__APPLE__)
+    void set_apple_store(std::unique_ptr<AppleStoreManager> mgr);
+#endif
+
+#if defined(_WIN32)
+    void set_microsoft_store(std::unique_ptr<MicrosoftStoreManager> mgr);
 #endif
 
 private:
@@ -82,8 +89,12 @@ private:
     WindowRegistry& registry_;
     std::string     app_name_;
 
-#if defined(__APPLE__) || defined(_WIN32)
-    std::unique_ptr<BillingManager> billing_;
+#if defined(__APPLE__)
+    std::unique_ptr<AppleStoreManager> apple_store_;
+#endif
+
+#if defined(_WIN32)
+    std::unique_ptr<MicrosoftStoreManager> microsoft_store_;
 #endif
 };
 

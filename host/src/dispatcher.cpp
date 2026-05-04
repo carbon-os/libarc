@@ -6,9 +6,15 @@ namespace arc {
 CommandDispatcher::CommandDispatcher(ipc::Server& server, WindowRegistry& registry)
     : server_(server), registry_(registry) {}
 
-#if defined(__APPLE__) || defined(_WIN32)
-void CommandDispatcher::set_billing(std::unique_ptr<BillingManager> billing) {
-    billing_ = std::move(billing);
+#if defined(__APPLE__)
+void CommandDispatcher::set_apple_store(std::unique_ptr<AppleStoreManager> mgr) {
+    apple_store_ = std::move(mgr);
+}
+#endif
+
+#if defined(_WIN32)
+void CommandDispatcher::set_microsoft_store(std::unique_ptr<MicrosoftStoreManager> mgr) {
+    microsoft_store_ = std::move(mgr);
 }
 #endif
 
@@ -64,10 +70,17 @@ void CommandDispatcher::dispatch(const ipc::Message& msg) {
     else if (t == "webview.hide")              on_webview_hide(j);
     else if (t == "webview.set_zorder")        on_webview_set_zorder(j);
 
-#if defined(__APPLE__) || defined(_WIN32)
-    else if (t.rfind("billing.", 0) == 0) {
-        if (billing_)
-            billing_->dispatch(t, j);
+#if defined(__APPLE__)
+    else if (t.rfind("apple.store.", 0) == 0) {
+        if (apple_store_)
+            apple_store_->dispatch(t, j);
+    }
+#endif
+
+#if defined(_WIN32)
+    else if (t.rfind("microsoft.store.", 0) == 0) {
+        if (microsoft_store_)
+            microsoft_store_->dispatch(t, j);
     }
 #endif
 }
@@ -230,18 +243,17 @@ void CommandDispatcher::on_window_set_always_on_top(const nlohmann::json& j) {
 
 std::optional<ui::BackdropEffect>
 CommandDispatcher::parse_effect(const std::string& name) {
-    if (name == "vibrancy")  return ui::BackdropEffect::Vibrancy;
-    if (name == "acrylic")   return ui::BackdropEffect::Acrylic;
-    if (name == "mica")      return ui::BackdropEffect::Mica;
-    if (name == "mica_alt")  return ui::BackdropEffect::MicaAlt;
+    if (name == "vibrancy") return ui::BackdropEffect::Vibrancy;
+    if (name == "acrylic")  return ui::BackdropEffect::Acrylic;
+    if (name == "mica")     return ui::BackdropEffect::Mica;
+    if (name == "mica_alt") return ui::BackdropEffect::MicaAlt;
     return std::nullopt;
 }
 
 void CommandDispatcher::on_window_set_effect(const nlohmann::json& j) {
     auto* mw = registry_.get_window(j.value("id", ""));
     if (!mw) return;
-    const std::string name = j.value("effect", "");
-    if (auto effect = parse_effect(name))
+    if (auto effect = parse_effect(j.value("effect", "")))
         mw->win->set_effect(*effect);
 }
 
@@ -266,7 +278,7 @@ void CommandDispatcher::on_webview_create(const nlohmann::json& j) {
         wv = registry_.create_window_webview(id, win_id, std::move(cfg));
     } else if (mode == "view") {
         ui::ViewConfig vcfg;
-        vcfg.position = { j.value("x", 0),      j.value("y", 0)       };
+        vcfg.position = { j.value("x", 0),      j.value("y", 0)        };
         vcfg.size     = { j.value("width", 400), j.value("height", 300) };
         wv = registry_.create_view_webview(id, win_id, std::move(vcfg), std::move(cfg));
 

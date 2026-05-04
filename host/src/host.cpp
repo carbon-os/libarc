@@ -17,8 +17,12 @@
 #  include <dlfcn.h>
 #endif
 
-#if defined(__APPLE__) || defined(_WIN32)
-#  include "billing_manager.hpp"
+#if defined(__APPLE__)
+#  include "apple_store_manager.hpp"
+#endif
+
+#if defined(_WIN32)
+#  include "microsoft_store_manager.hpp"
 #endif
 
 extern "C" typedef void (*AppMainFn)(const char* channel_id);
@@ -120,15 +124,15 @@ void Host::run() {
     });
     im.sentinel->hide();
 
-    // ── 9. Billing manager ────────────────────────────────────────────────────
-    // Constructed after the sentinel so the Windows path can supply a valid
-    // HWND.  The emit lambda calls server::send() which is thread-safe, so
-    // billing callbacks don't need extra marshalling.
+    // ── 9. Store managers ─────────────────────────────────────────────────────
+    // Both are constructed after the sentinel so the Windows path has a valid
+    // HWND. The emit lambda calls server::send() which is thread-safe, so
+    // store callbacks don't need extra marshalling.
 #if defined(__APPLE__)
     {
-        auto billing = std::make_unique<BillingManager>(
+        auto mgr = std::make_unique<AppleStoreManager>(
             [&im](nlohmann::json j) { im.server->send(std::move(j)); });
-        im.dispatcher->set_billing(std::move(billing));
+        im.dispatcher->set_apple_store(std::move(mgr));
     }
 #elif defined(_WIN32)
     {
@@ -137,9 +141,9 @@ void Host::run() {
         if (nh.type() == ui::NativeHandleType::HWND)
             hwnd = reinterpret_cast<HWND>(nh.get());
 
-        auto billing = std::make_unique<BillingManager>(
+        auto mgr = std::make_unique<MicrosoftStoreManager>(
             [&im](nlohmann::json j) { im.server->send(std::move(j)); }, hwnd);
-        im.dispatcher->set_billing(std::move(billing));
+        im.dispatcher->set_microsoft_store(std::move(mgr));
     }
 #endif
 

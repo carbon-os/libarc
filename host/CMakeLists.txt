@@ -5,8 +5,18 @@ add_library(host STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dispatcher.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main_thread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/registry.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/billing_manager.cpp
 )
+
+# ── Store managers (platform-specific sources) ────────────────────────────────
+if(APPLE)
+    target_sources(host PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/apple_store_manager.cpp
+    )
+elseif(WIN32)
+    target_sources(host PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/microsoft_store_manager.cpp
+    )
+endif()
 
 target_compile_features(host PUBLIC cxx_std_20)
 
@@ -21,17 +31,18 @@ target_link_libraries(host PUBLIC
     nlohmann_json::nlohmann_json
 )
 
-# ── Billing integration ───────────────────────────────────────────────────────
+# ── Store library linkage ─────────────────────────────────────────────────────
 if(APPLE)
     target_link_libraries(host PRIVATE billing_apple)
 elseif(WIN32)
     target_link_libraries(host PRIVATE billing_windows)
 endif()
 
-# ── macOS: compile main_thread.cpp as Objective-C++ ──────────────────────────
+# ── macOS: compile Objective-C++ sources ──────────────────────────────────────
 if(APPLE)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main_thread.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/apple_store_manager.cpp
         PROPERTIES COMPILE_FLAGS "-x objective-c++ -fobjc-arc"
     )
     find_library(FW_FOUNDATION Foundation REQUIRED)
