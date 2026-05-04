@@ -7,7 +7,6 @@ project(billing LANGUAGES CXX)
 
 if(APPLE)
 
-    # Apple build requires Objective-C++ and Swift in addition to C++.
     enable_language(OBJCXX Swift)
 
     # ── Locate tools ──────────────────────────────────────────────────────────
@@ -86,6 +85,7 @@ if(APPLE)
 
     add_dependencies(billing_apple billing_swift)
 
+    # macOS shim stays at C++17 — no coroutines used on this path
     target_compile_features(billing_apple PUBLIC cxx_std_17)
 
     target_include_directories(billing_apple PUBLIC
@@ -97,32 +97,33 @@ if(APPLE)
 
 elseif(WIN32)
 
-    # ── Windows: pure C++/WinRT — no extra language modes needed ──────────────
+    # ── Windows: C++/WinRT — requires C++20 for standard coroutine support ────
+    # co_await / fire_and_forget depend on <coroutine> which is C++20 only.
+    # The legacy /await flag was dropped by modern cppwinrt from vcpkg.
 
     add_library(billing_windows STATIC
         src/microsoft-store/Store.cpp
     )
 
-    target_compile_features(billing_windows PUBLIC cxx_std_17)
+    # C++20 for this target only — all other libarc targets remain C++17
+    target_compile_features(billing_windows PUBLIC cxx_std_20)
 
     # Require Windows 10 1607+ (Build 14393) — minimum for Windows.Services.Store.
-    # Also needed for correct WinRT header selection.
     target_compile_definitions(billing_windows PUBLIC
-        _WIN32_WINNT=0x0A00      # Windows 10+
+        _WIN32_WINNT=0x0A00
         WINVER=0x0A00
-        NTDDI_VERSION=0x0A000004 # NTDDI_WIN10_RS1 (Anniversary Update / 14393)
+        NTDDI_VERSION=0x0A000004
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
 
-    # cppwinrt from vcpkg — prefer this over the (potentially older) SDK headers.
     find_package(cppwinrt CONFIG REQUIRED)
 
     target_link_libraries(billing_windows PUBLIC
-        Microsoft::CppWinRT   # header-only projection + cppwinrt.exe tooling
-        windowsapp.lib        # Windows.Services.Store and other WinRT contracts
-        ole32.lib             # CoCreateGuid, CLSIDFromString
-        runtimeobject.lib     # RoInitialize / WinRT activation
+        Microsoft::CppWinRT
+        windowsapp.lib
+        ole32.lib
+        runtimeobject.lib
     )
 
     target_include_directories(billing_windows PUBLIC include)
