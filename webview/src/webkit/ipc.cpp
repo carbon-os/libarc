@@ -1,8 +1,11 @@
 #include "WebViewImpl.hpp"
 #include <gio/gio.h>
+#include <climits>
+#include <cstdlib>
 #include <sstream>
 #include <iomanip>
 #include <random>
+#include <unordered_map>
 
 static const char kIpcBridgeJS[] = R"js(
 (function () {
@@ -153,6 +156,42 @@ static std::string js_str(const std::string& s) {
     return out;
 }
 
+static std::string ext_of(const std::string& path) {
+    auto dot = path.rfind('.');
+    if (dot == std::string::npos) return "";
+    std::string ext = path.substr(dot + 1);
+    for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return ext;
+}
+
+static std::string mime_for_ext(const std::string& ext) {
+    static const std::unordered_map<std::string, std::string> map = {
+        {"html",  "text/html;charset=utf-8"},
+        {"htm",   "text/html;charset=utf-8"},
+        {"js",    "application/javascript"},
+        {"mjs",   "application/javascript"},
+        {"css",   "text/css"},
+        {"json",  "application/json"},
+        {"wasm",  "application/wasm"},
+        {"png",   "image/png"},
+        {"jpg",   "image/jpeg"},
+        {"jpeg",  "image/jpeg"},
+        {"gif",   "image/gif"},
+        {"webp",  "image/webp"},
+        {"svg",   "image/svg+xml"},
+        {"ico",   "image/x-icon"},
+        {"ttf",   "font/ttf"},
+        {"woff",  "font/woff"},
+        {"woff2", "font/woff2"},
+        {"txt",   "text/plain;charset=utf-8"},
+        {"xml",   "application/xml"},
+        {"mp4",   "video/mp4"},
+        {"webm",  "video/webm"},
+    };
+    auto it = map.find(ext);
+    return it != map.end() ? it->second : "application/octet-stream";
+}
+
 void WebViewImpl::install_ipc_bridge() {
     WebKitUserScript* script = webkit_user_script_new(
         kIpcBridgeJS,
@@ -174,108 +213,103 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
     std::string path = path_raw ? path_raw : "";
     if (!path.empty() && path[0] == '/') path = path.substr(1);
 
-    // ── Serve app content (load_html / load_file) ─────────────────────────
-    static const std::string kIpcPrefix = "__ipc__/";
-    if (path.rfind(kIpcPrefix, 0) != 0) {
-        if (!pending_html_.empty()) {
-            const std::string& html = pending_html_;
-            GInputStream* stream = g_memory_input_stream_new_from_data(
-                g_memdup(html.data(), html.size()), html.size(), g_free);
-            webkit_uri_scheme_request_finish(
-                request, stream, (gint64)html.size(), "text/html;charset=utf-8");
-            g_object_unref(stream);
-            return;
-        }
-        if (!pending_file_path_.empty()) {
-            GError* read_err = nullptr;
-            GMappedFile* mapped = g_mapped_file_new(
-                pending_file_path_.c_str(), FALSE, &read_err);
-            if (mapped) {
-                gsize         sz   = g_mapped_file_get_length(mapped);
-                gconstpointer data = g_mapped_file_get_contents(mapped);
-                GInputStream* stream = g_memory_input_stream_new_from_data(
-                    g_memdup(data, sz), sz, g_free);
-                g_mapped_file_unref(mapped);
-                webkit_uri_scheme_request_finish(
-                    request, stream, (gint64)sz, "text/html;charset=utf-8");
-                g_object_unref(stream);
-            } else {
-                webkit_uri_scheme_request_finish_error(request, read_err);
-                g_error_free(read_err);
-            }
-            return;
-        }
-        GError* err = g_error_new(
-            G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No content loaded");
-        webkit_uri_scheme_request_finish_error(request, err);
-        g_error_free(err);
-        return;
-    }
-
-    // ── IPC ───────────────────────────────────────────────────────────────
-    path = path.substr(kIpcPrefix.size());
-
-    size_t slash = path.find('/');
-    if (slash == std::string::npos) {
-        GError* err = g_error_new(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-                                  "Malformed IPC path");
-        webkit_uri_scheme_request_finish_error(request, err);
-        g_error_free(err);
-        return;
-    }
-
-    std::string action = path.substr(0, slash);
-    char* unescaped = g_uri_unescape_string(
-        path.substr(slash + 1).c_str(), nullptr);
-    std::string arg = unescaped ? unescaped : "";
-    if (unescaped) g_free(unescaped);
-
-    // ── Shared response helpers ────────────────────────────────────────────
-    auto task_ok_empty = [](WebKitURISchemeRequest* req) {
-        GInputStream* stream = g_memory_input_stream_new();
-        webkit_uri_scheme_request_finish(req, stream, 0,
-                                         "application/octet-stream");
-        g_object_unref(stream);
-    };
-
-    auto task_ok_bytes = [](WebKitURISchemeRequest* req,
-                            const std::vector<uint8_t>& bytes,
-                            const char* mime) {
+    // ── Shared response helpers ───────────────────────────────────────────────
+    auto finish_bytes = [](WebKitURISchemeRequest* req,
+                           const void* data, gsize sz, const char* mime) {
         GInputStream* stream = g_memory_input_stream_new_from_data(
-            g_memdup(bytes.data(), bytes.size()), bytes.size(), g_free);
-        webkit_uri_scheme_request_finish(req, stream, bytes.size(), mime);
+            g_memdup(data, sz), sz, g_free);
+        webkit_uri_scheme_request_finish(req, stream, (gint64)sz, mime);
         g_object_unref(stream);
     };
 
-    auto task_error = [](WebKitURISchemeRequest* req,
-                         const std::string& err_msg) {
-        GError* err = g_error_new(G_IO_ERROR, G_IO_ERROR_FAILED,
-                                  "%s", err_msg.c_str());
+    auto finish_empty = [](WebKitURISchemeRequest* req) {
+        GInputStream* stream = g_memory_input_stream_new();
+        webkit_uri_scheme_request_finish(req, stream, 0, "application/octet-stream");
+        g_object_unref(stream);
+    };
+
+    auto finish_error = [](WebKitURISchemeRequest* req, GIOErrorEnum code,
+                           const std::string& msg) {
+        GError* err = g_error_new(G_IO_ERROR, code, "%s", msg.c_str());
         webkit_uri_scheme_request_finish_error(req, err);
         g_error_free(err);
     };
 
-    // ── GET /pull/{token} ─────────────────────────────────────────────────
+    // ── webview://app/* — serve resource_root_ files or inline HTML ───────────
+    static const std::string kIpcPrefix = "__ipc__/";
+    if (path.rfind(kIpcPrefix, 0) != 0) {
+        // url_path is whatever follows the leading slash, e.g. "assets/app.js"
+        std::string url_path = path;
+        if (url_path.empty()) url_path = "index.html";
+
+        if (!resource_root_.empty()) {
+            std::string full = resource_root_ + "/" + url_path;
+
+            // Path traversal guard using realpath.
+            char resolved[PATH_MAX]{};
+            char root_res[PATH_MAX]{};
+            realpath(full.c_str(),          resolved);
+            realpath(resource_root_.c_str(), root_res);
+
+            if (std::string(resolved).find(root_res) != 0) {
+                finish_error(request, G_IO_ERROR_PERMISSION_DENIED, "Forbidden");
+                return;
+            }
+
+            GError*      err    = nullptr;
+            GMappedFile* mapped = g_mapped_file_new(resolved, FALSE, &err);
+            if (!mapped) {
+                webkit_uri_scheme_request_finish_error(request, err);
+                g_error_free(err);
+                return;
+            }
+            gsize       sz   = g_mapped_file_get_length(mapped);
+            const void* data = g_mapped_file_get_contents(mapped);
+            std::string mime = mime_for_ext(ext_of(resolved));
+            finish_bytes(request, data, sz, mime.c_str());
+            g_mapped_file_unref(mapped);
+            return;
+        }
+
+        // Fallback: inline pending_html_ (load_html / load_file entry point).
+        if (!pending_html_.empty()) {
+            finish_bytes(request, pending_html_.data(), pending_html_.size(),
+                         "text/html;charset=utf-8");
+            return;
+        }
+
+        finish_error(request, G_IO_ERROR_NOT_FOUND, "No content loaded");
+        return;
+    }
+
+    // ── webview://app/__ipc__/* — IPC transport ───────────────────────────────
+    path = path.substr(kIpcPrefix.size());
+
+    size_t slash = path.find('/');
+    if (slash == std::string::npos) {
+        finish_error(request, G_IO_ERROR_INVALID_ARGUMENT, "Malformed IPC path");
+        return;
+    }
+
+    std::string action = path.substr(0, slash);
+    char* unescaped = g_uri_unescape_string(path.substr(slash + 1).c_str(), nullptr);
+    std::string arg = unescaped ? unescaped : "";
+    if (unescaped) g_free(unescaped);
+
+    // ── GET /pull/{token} ─────────────────────────────────────────────────────
     if (action == "pull") {
         auto it = pull_queue_.find(arg);
         if (it != pull_queue_.end()) {
-            GInputStream* stream = g_memory_input_stream_new_from_data(
-                it->second.data(), it->second.size(), nullptr);
-            webkit_uri_scheme_request_finish(request, stream,
-                                             it->second.size(),
-                                             "application/octet-stream");
-            g_object_unref(stream);
+            finish_bytes(request, it->second.data(), it->second.size(),
+                         "application/octet-stream");
             pull_queue_.erase(it);
         } else {
-            GError* err = g_error_new(G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                                      "Token not found");
-            webkit_uri_scheme_request_finish_error(request, err);
-            g_error_free(err);
+            finish_error(request, G_IO_ERROR_NOT_FOUND, "Token not found");
         }
         return;
     }
 
-    // ── Read body ─────────────────────────────────────────────────────────
+    // ── Read body ─────────────────────────────────────────────────────────────
     GInputStream* body_stream =
         webkit_uri_scheme_request_get_http_body(request);
     std::vector<uint8_t> body_data;
@@ -289,7 +323,7 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
         }
     }
 
-    // ── POST /send/{channel} ──────────────────────────────────────────────
+    // ── POST /send/{channel} ──────────────────────────────────────────────────
     if (action == "send") {
         std::string json_str(body_data.begin(), body_data.end());
         Message msg;
@@ -301,14 +335,13 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
             it->second(msg);
         } else {
             auto wc = ipc_listeners_.find("*");
-            if (wc != ipc_listeners_.end())
-                wc->second(msg);
+            if (wc != ipc_listeners_.end()) wc->second(msg);
         }
-        task_ok_empty(request);
+        finish_empty(request);
         return;
     }
 
-    // ── POST /send-bin/{channel} ──────────────────────────────────────────
+    // ── POST /send-bin/{channel} ──────────────────────────────────────────────
     if (action == "send-bin") {
         BinaryMessage msg;
         msg.channel = arg;
@@ -319,18 +352,17 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
             it->second(msg);
         } else {
             auto wc = ipc_bin_listeners_.find("*");
-            if (wc != ipc_bin_listeners_.end())
-                wc->second(msg);
+            if (wc != ipc_bin_listeners_.end()) wc->second(msg);
         }
-        task_ok_empty(request);
+        finish_empty(request);
         return;
     }
 
-    // ── POST /invoke/{channel} ────────────────────────────────────────────
+    // ── POST /invoke/{channel} ────────────────────────────────────────────────
     if (action == "invoke") {
         auto it = ipc_handlers_.find(arg);
         if (it == ipc_handlers_.end()) {
-            task_error(request, "No handler: " + arg);
+            finish_error(request, G_IO_ERROR_NOT_FOUND, "No handler: " + arg);
             return;
         }
         std::string json_str(body_data.begin(), body_data.end());
@@ -339,14 +371,14 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
         msg.body    = json::parse(json_str, nullptr, false);
 
         g_object_ref(request);
-        msg.set_reply_fn([request, task_ok_bytes, task_error](
+        msg.set_reply_fn([request, finish_bytes, finish_error](
                              json body, bool ok, std::string reason) {
             if (ok) {
                 std::string s = body.dump();
-                std::vector<uint8_t> v(s.begin(), s.end());
-                task_ok_bytes(request, v, "application/json;charset=utf-8");
+                finish_bytes(request, s.data(), s.size(),
+                             "application/json;charset=utf-8");
             } else {
-                task_error(request, reason);
+                finish_error(request, G_IO_ERROR_FAILED, reason);
             }
             g_object_unref(request);
         });
@@ -354,11 +386,11 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
         return;
     }
 
-    // ── POST /invoke-bin/{channel} ────────────────────────────────────────
+    // ── POST /invoke-bin/{channel} ────────────────────────────────────────────
     if (action == "invoke-bin") {
         auto it = ipc_bin_handlers_.find(arg);
         if (it == ipc_bin_handlers_.end()) {
-            task_error(request, "No handler: " + arg);
+            finish_error(request, G_IO_ERROR_NOT_FOUND, "No handler: " + arg);
             return;
         }
         BinaryMessage msg;
@@ -366,13 +398,14 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
         msg.data    = std::move(body_data);
 
         g_object_ref(request);
-        msg.set_reply_fn([request, task_ok_bytes, task_error](
+        msg.set_reply_fn([request, finish_bytes, finish_error](
                              std::vector<uint8_t> data, bool ok,
                              std::string reason) {
             if (ok) {
-                task_ok_bytes(request, data, "application/octet-stream");
+                finish_bytes(request, data.data(), data.size(),
+                             "application/octet-stream");
             } else {
-                task_error(request, reason);
+                finish_error(request, G_IO_ERROR_FAILED, reason);
             }
             g_object_unref(request);
         });
@@ -380,7 +413,7 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
         return;
     }
 
-    // ── POST /reply/{token} ───────────────────────────────────────────────
+    // ── POST /reply/{token} ───────────────────────────────────────────────────
     if (action == "reply") {
         auto it = pending_host_invokes_.find(arg);
         if (it != pending_host_invokes_.end()) {
@@ -394,11 +427,11 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
             pending_host_invokes_.erase(it);
             fn(msg);
         }
-        task_ok_empty(request);
+        finish_empty(request);
         return;
     }
 
-    // ── POST /reply-bin/{token} ───────────────────────────────────────────
+    // ── POST /reply-bin/{token} ───────────────────────────────────────────────
     if (action == "reply-bin") {
         auto it = pending_host_bin_invokes_.find(arg);
         if (it != pending_host_bin_invokes_.end()) {
@@ -409,11 +442,11 @@ void WebViewImpl::handle_scheme_ipc_task(WebKitURISchemeRequest* request) {
             pending_host_bin_invokes_.erase(it);
             fn(msg);
         }
-        task_ok_empty(request);
+        finish_empty(request);
         return;
     }
 
-    task_error(request, "Unknown action: " + action);
+    finish_error(request, G_IO_ERROR_INVALID_ARGUMENT, "Unknown action: " + action);
 }
 
 // ── ipc_* implementations ─────────────────────────────────────────────────────

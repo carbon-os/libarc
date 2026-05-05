@@ -26,6 +26,9 @@ public:
     void        go_forward();
     std::string get_url();
 
+    // ── Resource root ─────────────────────────────────────────────────────
+    void set_resource_root(const std::string& path);
+
     // ── Script ────────────────────────────────────────────────────────────
     void eval(const std::string& js, std::function<void(EvalResult)> fn);
     void add_user_script(const std::string& js, ScriptInjectTime time);
@@ -94,12 +97,10 @@ public:
     std::function<void(ResourceRequest&)>        on_request_cb;
 
     // ── State ─────────────────────────────────────────────────────────────
-    bool ready_            = false;
-    bool devtools_enabled_ = false;
-
-    // ── Pending content (served through webview://app/) ───────────────────
-    std::string pending_html_;
-    std::string pending_file_path_;
+    bool        ready_            = false;
+    bool        devtools_enabled_ = false;
+    std::string pending_html_;    // set by load_html / load_file, served on webview://app/
+    std::string resource_root_;   // absolute path, no trailing slash
 
     std::unordered_map<std::string, DownloadEvent> active_downloads_;
 
