@@ -270,7 +270,8 @@ void CommandDispatcher::on_webview_create(const nlohmann::json& j) {
     const std::string mode   = j.value("mode", "window");
 
     webview::WebViewConfig cfg;
-    cfg.devtools = j.value("devtools", false);
+    cfg.devtools      = j.value("devtools", false);
+    cfg.resource_root = j.value("resource_root", ""); // ← NEW
 
     webview::WebView* wv = nullptr;
 
