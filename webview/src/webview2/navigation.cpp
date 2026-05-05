@@ -1,6 +1,7 @@
 #include "WebViewImpl.hpp"
 #include "string_util.hpp"
 #include <webview/webview.hpp>
+#include <fstream>
 
 namespace webview {
 
@@ -13,26 +14,29 @@ void WebViewImpl::load_url(const std::string& url) {
     webview_->Navigate(to_wide(url).c_str());
 }
 
-// load_html: store the HTML, then navigate to webview://localhost/ so the page
-// gets the webview:// origin needed for same-origin IPC fetch() calls.
 void WebViewImpl::load_html(const std::string& html) {
     is_ipc_content_ = true;
     ready_          = false;
     pending_html_   = html;
-    webview_->Navigate(L"webview://localhost/");
+    webview_->Navigate(L"webview://app/");
 }
 
-// load_file: navigate directly to the file:// URL.
-// IPC transport uses webview://, and the scheme registration sets AllowedOrigins
-// to "*", so cross-origin fetch() from file:// to webview://ipc/* is permitted.
 void WebViewImpl::load_file(const std::string& path) {
     is_ipc_content_ = true;
     ready_          = false;
-    pending_html_.clear();
-    std::string url = "file:///" + path;
-    // Normalise backslashes.
-    for (auto& c : url) if (c == '\\') c = '/';
-    webview_->Navigate(to_wide(url).c_str());
+
+    // Derive resource root from the file's containing directory so that
+    // sibling assets are resolved and served correctly via webview://app/*.
+    std::string norm = path;
+    for (auto& c : norm) if (c == '/') c = '\\';
+    auto slash = norm.rfind('\\');
+    resource_root_ = (slash != std::string::npos) ? norm.substr(0, slash) : ".";
+
+    // Read the file into pending_html_ so the scheme handler can serve it.
+    std::ifstream f(path, std::ios::binary);
+    pending_html_ = f ? std::string(std::istreambuf_iterator<char>(f), {}) : "";
+
+    webview_->Navigate(L"webview://app/");
 }
 
 void WebViewImpl::reload()     { webview_->Reload(); }

@@ -30,6 +30,9 @@ public:
     void        go_forward();
     std::string get_url();
 
+    // ── Resource root ────────────────────────────────────────────────────────
+    void set_resource_root(const std::string& path);
+
     // ── Script ──────────────────────────────────────────────────────────────
     void eval(const std::string& js, std::function<void(EvalResult)> fn);
     void add_user_script(const std::string& js, ScriptInjectTime time);
@@ -112,7 +115,8 @@ public:
     bool        ready_            = false;
     bool        is_ipc_content_   = false;
     bool        devtools_enabled_ = false;
-    std::string pending_html_;   // queued by load_html, served on webview://localhost/
+    std::string pending_html_;      // set by load_html / load_file, served on webview://app/
+    std::string resource_root_;     // absolute path, no trailing slash
 
     // ── Active downloads ──────────────────────────────────────────────────────
     std::unordered_map<std::string, DownloadEvent> active_downloads_;
@@ -133,8 +137,6 @@ public:
     std::unordered_map<std::string, PendingHostBinaryInvoke> pending_host_bin_invokes_;
 
     // ── Pending renderer → host invoke deferrals ──────────────────────────────
-    // When the renderer calls invoke/invoke-bin, we hold a deferral open until
-    // the host calls msg.reply() / msg.reject().
     struct PendingRendererInvoke {
         Microsoft::WRL::ComPtr<ICoreWebView2Deferral>                      deferral;
         Microsoft::WRL::ComPtr<ICoreWebView2WebResourceRequestedEventArgs> ev_args;
@@ -161,7 +163,6 @@ public:
 
     HWND hwnd_ = nullptr;
 
-    // Current find query (find_next/find_prev re-use it)
     std::string find_query_;
 
 private:
@@ -170,7 +171,6 @@ private:
     void install_ipc_bridge();
     void eval_js_raw(const std::string& js);
 
-    // IDs of scripts added via add_user_script (for remove_user_scripts)
     std::vector<std::wstring> user_script_ids_;
 };
 

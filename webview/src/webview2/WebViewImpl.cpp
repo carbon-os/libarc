@@ -13,11 +13,6 @@ namespace webview {
 using namespace detail;
 using namespace Microsoft::WRL;
 
-// ── Custom scheme registration ────────────────────────────────────────────────
-// Registers "webview://" as a secure custom scheme that accepts requests from
-// any origin, enabling the IPC transport and HTML content serving to work
-// regardless of the origin of the loaded page.
-
 class WebviewSchemeRegistration final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>,
                           ICoreWebView2CustomSchemeRegistration>
@@ -61,8 +56,6 @@ public:
     }
 };
 
-// ── Parent-window subclass proc (auto-resize) ─────────────────────────────────
-
 static LRESULT CALLBACK ParentSubclassProc(
     HWND hWnd, UINT msg, WPARAM wp, LPARAM lp,
     UINT_PTR /*id*/, DWORD_PTR data)
@@ -78,6 +71,7 @@ static LRESULT CALLBACK ParentSubclassProc(
 
 WebViewImpl::WebViewImpl(NativeHandle handle, WebViewConfig config) {
     devtools_enabled_ = config.devtools;
+    resource_root_    = config.resource_root;   // ← new
     setup(handle, config);
 }
 
@@ -99,19 +93,14 @@ WebViewImpl::~WebViewImpl() {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
-    // Resolve parent HWND from NativeHandle.
-    // Both NSWindow-equivalent (top-level) and NSView-equivalent (child HWND)
-    // are accepted; WebView2 hosts inside any valid HWND.
     switch (handle.type()) {
         case NativeHandleType::HWND:
             hwnd_ = static_cast<HWND>(handle.get());
             break;
         default:
-            // On Windows only HWND is meaningful.
             return;
     }
 
-    // Build environment options with custom scheme registration.
     auto opts = Make<CoreWebView2EnvironmentOptions>();
     ComPtr<ICoreWebView2EnvironmentOptions4> opts4;
     if (SUCCEEDED(opts.As(&opts4))) {
@@ -120,7 +109,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
         opts4->SetCustomSchemeRegistrations(1, regs);
     }
 
-    // Convert paths to wide strings
     std::wstring browser_dir = config.webview2_runtime_path.empty()
         ? L"" : to_wide(config.webview2_runtime_path);
     std::wstring user_dir = config.webview2_user_data_path.empty()
@@ -129,7 +117,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
     LPCWSTR pBrowserDir = browser_dir.empty() ? nullptr : browser_dir.c_str();
     LPCWSTR pUserDir    = user_dir.empty()    ? nullptr : user_dir.c_str();
 
-    // Async creation — pump the message loop until both callbacks fire.
     bool created = false;
 
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
@@ -151,7 +138,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
                             if (devtools_enabled_)
                                 settings_->put_AreDevToolsEnabled(TRUE);
 
-                            // Register webview:// filter for IPC + content serving.
                             webview_->AddWebResourceRequestedFilter(
                                 L"webview://*",
                                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
@@ -166,7 +152,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
 
     if (FAILED(hr)) return;
 
-    // Pump until created.
     MSG msg;
     while (!created) {
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -177,16 +162,20 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
         }
     }
 
-    // Auto-resize when the parent window is resized.
     SetWindowSubclass(hwnd_, ParentSubclassProc, 1,
                       reinterpret_cast<DWORD_PTR>(this));
+}
+
+// ── Resource root ─────────────────────────────────────────────────────────────
+
+void WebViewImpl::set_resource_root(const std::string& path) {
+    resource_root_ = path;
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
 void WebViewImpl::wire_events() {
 
-    // NavigationStarting → on_navigate_cb
     webview_->add_NavigationStarting(
         Callback<ICoreWebView2NavigationStartingEventHandler>(
             [this](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) {
@@ -200,7 +189,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &nav_starting_token_);
 
-    // ContentLoading → on_load_commit_cb
     webview_->add_ContentLoading(
         Callback<ICoreWebView2ContentLoadingEventHandler>(
             [this](ICoreWebView2* wv, ICoreWebView2ContentLoadingEventArgs*) {
@@ -212,7 +200,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &content_loading_token_);
 
-    // NavigationCompleted → on_load_finish_cb / on_load_failed_cb / on_ready_cb
     webview_->add_NavigationCompleted(
         Callback<ICoreWebView2NavigationCompletedEventHandler>(
             [this](ICoreWebView2* wv, ICoreWebView2NavigationCompletedEventArgs* args) {
@@ -243,7 +230,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &nav_completed_token_);
 
-    // DocumentTitleChanged → on_title_change_cb
     webview_->add_DocumentTitleChanged(
         Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
             [this](ICoreWebView2* wv, IUnknown*) {
@@ -254,7 +240,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &title_changed_token_);
 
-    // NewWindowRequested → on_new_window_cb
     webview_->add_NewWindowRequested(
         Callback<ICoreWebView2NewWindowRequestedEventHandler>(
             [this](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) {
@@ -273,7 +258,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &new_window_token_);
 
-    // WindowCloseRequested → on_close_cb
     webview_->add_WindowCloseRequested(
         Callback<ICoreWebView2WindowCloseRequestedEventHandler>(
             [this](ICoreWebView2*, IUnknown*) {
@@ -281,7 +265,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &close_token_);
 
-    // WebResourceRequested → dispatch_web_resource_request
     webview_->add_WebResourceRequested(
         Callback<ICoreWebView2WebResourceRequestedEventHandler>(
             [this](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) {
@@ -289,7 +272,6 @@ void WebViewImpl::wire_events() {
                 return S_OK;
             }).Get(), &web_resource_token_);
 
-    // PermissionRequested → on_permission_cb
     webview_->add_PermissionRequested(
         Callback<ICoreWebView2PermissionRequestedEventHandler>(
             [this](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) {
@@ -351,5 +333,9 @@ WebView::WebView(NativeHandle handle, WebViewConfig config)
 {}
 
 WebView::~WebView() = default;
+
+void WebView::set_resource_root(std::string path) {
+    impl_->set_resource_root(path);
+}
 
 } // namespace webview

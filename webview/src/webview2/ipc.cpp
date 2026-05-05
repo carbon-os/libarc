@@ -7,6 +7,7 @@
 #include <sstream>
 #include <random>
 #include <iomanip>
+#include <fstream>
 #include <map>
 
 static const char kIpcBridgeJS[] = R"js(
@@ -157,6 +158,42 @@ static std::string js_str(const std::string& s) {
     return out;
 }
 
+static std::string mime_for_ext(const std::string& ext) {
+    static const std::map<std::string, std::string> map = {
+        {"html",  "text/html;charset=utf-8"},
+        {"htm",   "text/html;charset=utf-8"},
+        {"js",    "application/javascript"},
+        {"mjs",   "application/javascript"},
+        {"css",   "text/css"},
+        {"json",  "application/json"},
+        {"wasm",  "application/wasm"},
+        {"png",   "image/png"},
+        {"jpg",   "image/jpeg"},
+        {"jpeg",  "image/jpeg"},
+        {"gif",   "image/gif"},
+        {"webp",  "image/webp"},
+        {"svg",   "image/svg+xml"},
+        {"ico",   "image/x-icon"},
+        {"ttf",   "font/ttf"},
+        {"woff",  "font/woff"},
+        {"woff2", "font/woff2"},
+        {"txt",   "text/plain;charset=utf-8"},
+        {"xml",   "application/xml"},
+        {"mp4",   "video/mp4"},
+        {"webm",  "video/webm"},
+    };
+    auto it = map.find(ext);
+    return it != map.end() ? it->second : "application/octet-stream";
+}
+
+static std::string ext_of(const std::string& path) {
+    auto dot = path.rfind('.');
+    if (dot == std::string::npos) return "";
+    std::string ext = path.substr(dot + 1);
+    for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return ext;
+}
+
 static HRESULT make_response(
     ICoreWebView2Environment* env,
     int status, const std::wstring& reason,
@@ -257,17 +294,6 @@ void WebViewImpl::dispatch_web_resource_request(
     CoStr method_cs; req->get_Method(&method_cs.ptr);
     std::string method = method_cs.str();
 
-    // ── webview://localhost/ — serve pending HTML content ─────────────────────
-    if (url.rfind("webview://localhost", 0) == 0 && !pending_html_.empty()) {
-        std::vector<uint8_t> body(pending_html_.begin(), pending_html_.end());
-        ComPtr<ICoreWebView2WebResourceResponse> resp;
-        make_response(environment_.Get(), 200, L"OK", body,
-                      make_response_headers(200, "text/html;charset=utf-8"),
-                      resp);
-        args->put_Response(resp.Get());
-        return;
-    }
-
     // ── webview://ipc/* — IPC transport ───────────────────────────────────────
     if (url.rfind("webview://ipc/", 0) == 0) {
         ComPtr<IStream> body_stream;
@@ -301,7 +327,6 @@ void WebViewImpl::dispatch_web_resource_request(
         bool needs_deferral = (action == "invoke" || action == "invoke-bin");
         if (needs_deferral) args->GetDeferral(&deferral);
 
-        // ── GET /pull/{token} ────────────────────────────────────────────────
         if (action == "pull" && method == "GET") {
             auto it = pull_queue_.find(arg);
             if (it == pull_queue_.end()) {
@@ -315,7 +340,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /send/{channel} ─────────────────────────────────────────────
         if (action == "send") {
             std::string json_str(body_bytes.begin(), body_bytes.end());
             Message msg;
@@ -334,7 +358,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /send-bin/{channel} ─────────────────────────────────────────
         if (action == "send-bin") {
             BinaryMessage msg;
             msg.channel = arg;
@@ -352,7 +375,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /invoke/{channel} ───────────────────────────────────────────
         if (action == "invoke") {
             auto it = ipc_handlers_.find(arg);
             if (it == ipc_handlers_.end()) {
@@ -386,7 +408,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /invoke-bin/{channel} ───────────────────────────────────────
         if (action == "invoke-bin") {
             auto it = ipc_bin_handlers_.find(arg);
             if (it == ipc_bin_handlers_.end()) {
@@ -420,7 +441,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /reply/{token} ──────────────────────────────────────────────
         if (action == "reply") {
             auto it = pending_host_invokes_.find(arg);
             if (it != pending_host_invokes_.end()) {
@@ -437,7 +457,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /reply-bin/{token} ──────────────────────────────────────────
         if (action == "reply-bin") {
             auto it = pending_host_bin_invokes_.find(arg);
             if (it != pending_host_bin_invokes_.end()) {
@@ -451,7 +470,6 @@ void WebViewImpl::dispatch_web_resource_request(
             return;
         }
 
-        // ── POST /__console__/ ───────────────────────────────────────────────
         if (action == "__console__") {
             if (on_console_cb) {
                 std::string json_str(body_bytes.begin(), body_bytes.end());
@@ -473,6 +491,47 @@ void WebViewImpl::dispatch_web_resource_request(
 
         respond_error(args, nullptr, environment_.Get(), 400,
                       "unknown IPC action: " + action);
+        return;
+    }
+
+    // ── webview://app/* — serve resource_root_ files or inline HTML ───────────
+    if (url.rfind("webview://app", 0) == 0) {
+        // Extract the URL path component.
+        std::string url_path = url.substr(strlen("webview://app"));
+        if (url_path.empty() || url_path == "/") url_path = "/index.html";
+
+        if (!resource_root_.empty()) {
+            // Build the full filesystem path (convert forward slashes).
+            std::string full = resource_root_;
+            for (char c : url_path)
+                full += (c == '/') ? '\\' : c;
+
+            // Path traversal guard.
+            wchar_t resolved[MAX_PATH]{};
+            wchar_t root_res[MAX_PATH]{};
+            GetFullPathNameW(to_wide(full).c_str(),         MAX_PATH, resolved, nullptr);
+            GetFullPathNameW(to_wide(resource_root_).c_str(), MAX_PATH, root_res, nullptr);
+
+            if (std::wstring(resolved).find(root_res) != 0) {
+                respond_error(args, nullptr, environment_.Get(), 403, "Forbidden");
+                return;
+            }
+
+            std::ifstream f(resolved, std::ios::binary);
+            if (!f) {
+                respond_error(args, nullptr, environment_.Get(), 404, "Not found");
+                return;
+            }
+            std::vector<uint8_t> body(std::istreambuf_iterator<char>(f), {});
+            std::string mime = mime_for_ext(ext_of(to_utf8(resolved)));
+            respond(args, nullptr, environment_.Get(), 200, body, mime);
+            return;
+        }
+
+        // Fallback: serve inline pending_html_.
+        std::vector<uint8_t> body(pending_html_.begin(), pending_html_.end());
+        respond(args, nullptr, environment_.Get(), 200, body,
+                "text/html;charset=utf-8");
         return;
     }
 
