@@ -5,10 +5,10 @@
 #  import <Cocoa/Cocoa.h>
 #  import "WebViewDelegate.h"
 #else
-   using WKWebView             = void;
+   using WKWebView              = void;
    using WKWebViewConfiguration = void;
-   using WebViewDelegate       = void;
-   using WebViewSchemeHandler  = void;
+   using WebViewDelegate        = void;
+   using WebViewSchemeHandler   = void;
 #endif
 
 #include <webview/webview.hpp>
@@ -34,6 +34,9 @@ public:
     void        go_back();
     void        go_forward();
     std::string get_url();
+
+    // ── Resource root ─────────────────────────────────────────────────────
+    void set_resource_root(const std::string& path);
 
     // ── Script ────────────────────────────────────────────────────────────
     void eval(const std::string& js, std::function<void(EvalResult)> fn);
@@ -90,7 +93,7 @@ public:
     // Called from WebViewSchemeHandler when a task is cancelled mid-flight.
     void on_scheme_task_stopped(void* raw_task);
 
-    // ── Stored callbacks (set by on_* methods, read by delegate) ─────────
+    // ── Stored callbacks ──────────────────────────────────────────────────
     std::function<void()>                        on_ready_cb;
     std::function<bool()>                        on_close_cb;
     std::function<void(NavigationEvent&)>        on_navigate_cb;
@@ -113,50 +116,44 @@ public:
     std::function<void(ResourceRequest&)>        on_request_cb;
 
     // ── State ─────────────────────────────────────────────────────────────
-    bool ready_            = false;
-    bool is_ipc_content_   = false;
-    bool devtools_enabled_ = false;
+    bool        ready_            = false;
+    bool        is_ipc_content_   = false;
+    bool        devtools_enabled_ = false;
+    std::string resource_root_;
 
     // ── Active downloads ──────────────────────────────────────────────────
     std::unordered_map<std::string, DownloadEvent> active_downloads_;
 
     // ── IPC channel tables ────────────────────────────────────────────────
-    // Renderer → host handlers (invoke, expects reply via msg.reply/reject)
     std::unordered_map<std::string, std::function<void(Message&)>>       ipc_handlers_;
-    // Renderer → host listeners (fire-and-forget, no reply)
     std::unordered_map<std::string, std::function<void(Message&)>>       ipc_listeners_;
-    // Binary variants
     std::unordered_map<std::string, std::function<void(BinaryMessage&)>> ipc_bin_handlers_;
     std::unordered_map<std::string, std::function<void(BinaryMessage&)>> ipc_bin_listeners_;
 
     // ── Host → Renderer pull queue ────────────────────────────────────────
-    // Keyed by token; consumed by renderer GET /ipc/pull/{token}.
     std::unordered_map<std::string, std::vector<uint8_t>> pull_queue_;
 
     // ── Pending host-initiated invokes ────────────────────────────────────
-    // Waiting for renderer to POST /ipc/reply/{token} or /ipc/reply-bin/{token}.
     struct PendingHostInvoke       { std::function<void(Message&)>       fn; };
     struct PendingHostBinaryInvoke { std::function<void(BinaryMessage&)> fn; };
     std::unordered_map<std::string, PendingHostInvoke>       pending_host_invokes_;
     std::unordered_map<std::string, PendingHostBinaryInvoke> pending_host_bin_invokes_;
 
-    // ── ObjC objects (hidden from plain C++ TUs) ──────────────────────────
+    // ── ObjC objects ──────────────────────────────────────────────────────
 #ifdef __OBJC__
     WKWebView*              wkwebview_      = nil;
     WKWebViewConfiguration* wk_config_      = nil;
     WebViewDelegate*        delegate_       = nil;
     WebViewSchemeHandler*   scheme_handler_ = nil;
 
-    // Held scheme tasks for renderer-initiated invokes (task kept open until
-    // the host handler calls msg.reply() / msg.reject()).
     NSMutableDictionary<NSString*, id<WKURLSchemeTask>>* held_invoke_tasks_     = nil;
     NSMutableDictionary<NSString*, id<WKURLSchemeTask>>* held_bin_invoke_tasks_ = nil;
 #else
-    void* wkwebview_           = nullptr;
-    void* wk_config_           = nullptr;
-    void* delegate_            = nullptr;
-    void* scheme_handler_      = nullptr;
-    void* held_invoke_tasks_   = nullptr;
+    void* wkwebview_             = nullptr;
+    void* wk_config_             = nullptr;
+    void* delegate_              = nullptr;
+    void* scheme_handler_        = nullptr;
+    void* held_invoke_tasks_     = nullptr;
     void* held_bin_invoke_tasks_ = nullptr;
 #endif
 

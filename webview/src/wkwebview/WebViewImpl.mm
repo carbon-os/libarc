@@ -5,11 +5,94 @@
 #include <string>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WebViewSchemeHandler — serves webview:// content.
+// WebViewSchemeHandler — serves all webview:// traffic.
 //
-// Routing:
-//   host == "ipc"  →  IPC requests, dispatched to WebViewImpl::handle_scheme_ipc_task
-//   anything else  →  serve stored HTML (load_html / load_file)
+// URL routing by host:
+//   webview://ipc/*  →  IPC (handle_scheme_ipc_task)
+//   webview://app/*  →  static files from resource_root, or inline htmlContent
+//   anything else    →  404
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Private helpers declared in a category so the main @implementation stays clean.
+@interface WebViewSchemeHandler (Private)
+- (NSString*)mimeTypeForPath:(NSString*)path;
+- (void)replyToTask:(id<WKURLSchemeTask>)task
+         statusCode:(int)code
+               data:(NSData*)data
+           mimeType:(NSString*)mime
+            headers:(NSDictionary*)extraHeaders;
+- (void)replyToTask:(id<WKURLSchemeTask>)task
+         statusCode:(int)code
+            message:(NSString*)msg;
+@end
+
+@implementation WebViewSchemeHandler (Private)
+
+- (NSString*)mimeTypeForPath:(NSString*)path {
+    static NSDictionary* map = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"html":  @"text/html;charset=utf-8",
+            @"htm":   @"text/html;charset=utf-8",
+            @"js":    @"application/javascript",
+            @"mjs":   @"application/javascript",
+            @"css":   @"text/css",
+            @"json":  @"application/json",
+            @"wasm":  @"application/wasm",
+            @"png":   @"image/png",
+            @"jpg":   @"image/jpeg",
+            @"jpeg":  @"image/jpeg",
+            @"gif":   @"image/gif",
+            @"webp":  @"image/webp",
+            @"svg":   @"image/svg+xml",
+            @"ico":   @"image/x-icon",
+            @"ttf":   @"font/ttf",
+            @"woff":  @"font/woff",
+            @"woff2": @"font/woff2",
+            @"txt":   @"text/plain;charset=utf-8",
+            @"xml":   @"application/xml",
+            @"mp4":   @"video/mp4",
+            @"webm":  @"video/webm",
+        };
+    });
+    return map[path.pathExtension.lowercaseString] ?: @"application/octet-stream";
+}
+
+- (void)replyToTask:(id<WKURLSchemeTask>)task
+         statusCode:(int)code
+               data:(NSData*)data
+           mimeType:(NSString*)mime
+            headers:(NSDictionary*)extraHeaders {
+    NSMutableDictionary* hdrs = [@{
+        @"Content-Type":                mime ?: @"application/octet-stream",
+        @"Access-Control-Allow-Origin": @"*",
+        @"Cache-Control":               @"no-store",
+    } mutableCopy];
+    if (extraHeaders) [hdrs addEntriesFromDictionary:extraHeaders];
+
+    NSHTTPURLResponse* resp =
+        [[NSHTTPURLResponse alloc] initWithURL:task.request.URL
+                                    statusCode:code
+                                   HTTPVersion:@"HTTP/1.1"
+                                  headerFields:hdrs];
+    @try {
+        [task didReceiveResponse:resp];
+        if (data.length) [task didReceiveData:data];
+        [task didFinish];
+    } @catch (NSException*) {}
+}
+
+- (void)replyToTask:(id<WKURLSchemeTask>)task
+         statusCode:(int)code
+            message:(NSString*)msg {
+    NSData* d = [msg dataUsingEncoding:NSUTF8StringEncoding];
+    [self replyToTask:task statusCode:code data:d
+             mimeType:@"text/plain;charset=utf-8" headers:nil];
+}
+
+@end
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 @implementation WebViewSchemeHandler
@@ -17,37 +100,128 @@
 - (void)webView:(WKWebView*)webView
     startURLSchemeTask:(id<WKURLSchemeTask>)task {
 
-    NSURL* url = task.request.URL;
+    NSURL*    url  = task.request.URL;
+    NSString* host = url.host ?: @"";
 
-    // Route IPC requests to the impl.
-    if ([[url host] isEqualToString:@"ipc"]) {
+    // ── webview://ipc/* ───────────────────────────────────────────────────────
+    if ([host isEqualToString:@"ipc"]) {
         if (self.impl)
             self.impl->handle_scheme_ipc_task((__bridge void*)task);
-        else {
-            NSError* err = [NSError errorWithDomain:NSURLErrorDomain
-                                              code:NSURLErrorUnknown userInfo:nil];
-            [task didFailWithError:err];
-        }
+        else
+            [self replyToTask:task statusCode:500 message:@"IPC not ready"];
         return;
     }
 
-    // Default: serve the HTML content loaded via load_html().
+    // ── Unknown host ──────────────────────────────────────────────────────────
+    if (![host isEqualToString:@"app"]) {
+        [self replyToTask:task statusCode:404 message:@"Unknown host"];
+        return;
+    }
+
+    // ── webview://app/* ───────────────────────────────────────────────────────
+
+    auto* impl = self.impl;
+    if (impl && impl->on_request_cb) {
+        __block webview::ResourceRequest req;
+        req.url    = url.absoluteString.UTF8String ?: "";
+        req.method = task.request.HTTPMethod.UTF8String ?: "GET";
+
+        [task.request.allHTTPHeaderFields enumerateKeysAndObjectsUsingBlock:
+            ^(NSString* k, NSString* v, BOOL*) {
+                req.headers[k.UTF8String] = v.UTF8String;
+            }];
+
+        NSString* accept = task.request.allHTTPHeaderFields[@"Accept"] ?: @"";
+        if      ([accept containsString:@"text/html"])      req.resource_type = webview::ResourceType::Document;
+        else if ([accept containsString:@"javascript"])     req.resource_type = webview::ResourceType::Script;
+        else if ([accept containsString:@"image"])          req.resource_type = webview::ResourceType::Image;
+        else                                                req.resource_type = webview::ResourceType::Other;
+
+        impl->on_request_cb(req);
+
+        switch (req.action()) {
+            case webview::ResourceRequest::Action::Cancel:
+                [task didFailWithError:
+                    [NSError errorWithDomain:NSURLErrorDomain
+                                       code:NSURLErrorCancelled userInfo:nil]];
+                return;
+
+            case webview::ResourceRequest::Action::Redirect: {
+                NSURL* dest = [NSURL URLWithString:@(req.redirect_url().c_str())];
+                NSURLResponse* r = [[NSURLResponse alloc]
+                    initWithURL:dest MIMEType:@"text/html"
+                    expectedContentLength:-1 textEncodingName:nil];
+                @try { [task didReceiveResponse:r]; [task didFinish]; }
+                @catch (NSException*) {}
+                return;
+            }
+
+            case webview::ResourceRequest::Action::Respond: {
+                auto& res = req.response();
+                NSMutableDictionary* hdrs = [NSMutableDictionary dictionary];
+                for (auto& [k, v] : res.headers)
+                    hdrs[@(k.c_str())] = @(v.c_str());
+                NSData* body = [NSData dataWithBytes:res.body.data()
+                                             length:res.body.size()];
+                NSHTTPURLResponse* r = [[NSHTTPURLResponse alloc]
+                    initWithURL:url statusCode:res.status
+                    HTTPVersion:@"HTTP/1.1" headerFields:hdrs];
+                @try {
+                    [task didReceiveResponse:r];
+                    if (body.length) [task didReceiveData:body];
+                    [task didFinish];
+                } @catch (NSException*) {}
+                return;
+            }
+
+            default: break;
+        }
+    }
+
+    // ── Serve from resource_root ──────────────────────────────────────────────
+    std::string root = impl ? impl->resource_root_ : "";
+
+    if (!root.empty()) {
+        NSString* urlPath = url.path;
+        if (!urlPath.length || [urlPath isEqualToString:@"/"])
+            urlPath = @"/index.html";
+
+        NSString* joined   = [NSString stringWithFormat:@"%s%@", root.c_str(), urlPath];
+        NSString* resolved = joined.stringByResolvingSymlinksInPath;
+        NSString* rootRes  = [@(root.c_str()) stringByResolvingSymlinksInPath];
+
+        if (![resolved hasPrefix:rootRes]) {
+            [self replyToTask:task statusCode:403 message:@"Forbidden"];
+            return;
+        }
+
+        NSData* data = [NSData dataWithContentsOfFile:resolved];
+        if (!data) {
+            [self replyToTask:task statusCode:404 message:@"Not found"];
+            return;
+        }
+
+        [self replyToTask:task statusCode:200 data:data
+                 mimeType:[self mimeTypeForPath:resolved] headers:nil];
+        return;
+    }
+
+    // ── Fallback: inline htmlContent ──────────────────────────────────────────
     NSString* html = self.htmlContent ?: @"";
     NSData*   data = [html dataUsingEncoding:NSUTF8StringEncoding];
-
-    NSURLResponse* resp =
-        [[NSURLResponse alloc] initWithURL:url
-                                  MIMEType:@"text/html"
-                     expectedContentLength:(NSInteger)data.length
-                          textEncodingName:@"utf-8"];
-    [task didReceiveResponse:resp];
-    [task didReceiveData:data];
-    [task didFinish];
+    NSURLResponse* r = [[NSURLResponse alloc]
+        initWithURL:url MIMEType:@"text/html"
+        expectedContentLength:(NSInteger)data.length
+        textEncodingName:@"utf-8"];
+    @try {
+        [task didReceiveResponse:r];
+        if (data.length) [task didReceiveData:data];
+        [task didFinish];
+    } @catch (NSException*) {}
 }
 
 - (void)webView:(WKWebView*)webView
     stopURLSchemeTask:(id<WKURLSchemeTask>)task {
-
     if (self.impl)
         self.impl->on_scheme_task_stopped((__bridge void*)task);
 }
@@ -265,7 +439,6 @@
 
     auto* impl = self.impl;
     if (!impl) return;
-
     if (![message.name isEqualToString:@"__wv_console__"]) return;
     if (![message.body isKindOfClass:[NSDictionary class]])  return;
 
@@ -295,6 +468,7 @@ namespace webview {
 
 WebViewImpl::WebViewImpl(NativeHandle handle, WebViewConfig config) {
     devtools_enabled_ = config.devtools;
+    resource_root_    = config.resource_root;
     setup(handle, config);
 }
 
@@ -308,7 +482,7 @@ WebViewImpl::~WebViewImpl() {
 }
 
 void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
-    wk_config_      = [[WKWebViewConfiguration alloc] init];
+    wk_config_ = [[WKWebViewConfiguration alloc] init];
 
     scheme_handler_      = [[WebViewSchemeHandler alloc] init];
     scheme_handler_.impl = this;
@@ -345,13 +519,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
     }
 
     // ── Create WKWebView ──────────────────────────────────────────────────────
-    // IMPORTANT: Use frame-based layout (autoresizingMask), NOT Auto Layout
-    // constraints. The Web Inspector spawns its own NSWindow with an internal
-    // WKWebView that uses frame-based layout. When the inspected WKWebView is
-    // under Auto Layout, AppKit resets the CALayer transform on every layout
-    // pass, which causes the inspector panel to render blank / flicker. Using
-    // autoresizingMask keeps the WKWebView out of the Auto Layout engine while
-    // still tracking the parent view size correctly on resize.
     wkwebview_ = [[WKWebView alloc] initWithFrame:parentView.bounds
                                     configuration:wk_config_];
     wkwebview_.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -359,9 +526,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
     wkwebview_.navigationDelegate = delegate_;
     wkwebview_.UIDelegate         = delegate_;
 
-    // ── macOS 13.3+: opt in to Web Inspector access ───────────────────────────
-    // Prior to 13.3, all dev-signed builds were always inspectable.
-    // From 13.3 onward, inspectable defaults to NO — must be set explicitly.
     if (config.devtools) {
         if (@available(macOS 13.3, *))
             wkwebview_.inspectable = YES;
@@ -377,11 +541,6 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
 
     [parentView addSubview:wkwebview_];
 
-    // Fire on_ready_cb asynchronously. The WKWebView has no initial navigation
-    // so didFinishNavigation never fires on its own. Posting to the main queue
-    // guarantees wire_webview_events() has already set on_ready_cb before this
-    // block runs — everything is on the main thread and dispatch_async is FIFO,
-    // so this block is always enqueued after the caller finishes wiring events.
     auto* impl_ptr = this;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!impl_ptr->ready_) {
@@ -389,6 +548,10 @@ void WebViewImpl::setup(NativeHandle handle, WebViewConfig config) {
             if (impl_ptr->on_ready_cb) impl_ptr->on_ready_cb();
         }
     });
+}
+
+void WebViewImpl::set_resource_root(const std::string& path) {
+    resource_root_ = path;
 }
 
 void WebViewImpl::eval_js_raw(const std::string& js) {
@@ -403,5 +566,9 @@ WebView::WebView(NativeHandle handle, WebViewConfig config)
 {}
 
 WebView::~WebView() = default;
+
+void WebView::set_resource_root(std::string path) {
+    impl_->set_resource_root(path);
+}
 
 } // namespace webview

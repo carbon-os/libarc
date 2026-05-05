@@ -5,8 +5,6 @@ namespace webview {
 
 void WebViewImpl::load_url(const std::string& url) {
     is_ipc_content_ = false;
-    // ready_ intentionally NOT reset — it means "webview is initialised",
-    // not "this navigation finished". Use on_load_finish_cb for that.
     NSURL*        nsUrl   = [NSURL URLWithString:@(url.c_str())];
     NSURLRequest* request = [NSURLRequest requestWithURL:nsUrl];
     [wkwebview_ loadRequest:request];
@@ -15,20 +13,33 @@ void WebViewImpl::load_url(const std::string& url) {
 void WebViewImpl::load_html(const std::string& html) {
     is_ipc_content_             = true;
     scheme_handler_.htmlContent = @(html.c_str());
-    NSURL* base = [NSURL URLWithString:@"webview://localhost/"];
-    [wkwebview_ loadHTMLString:@(html.c_str()) baseURL:base];
+    // Route through our scheme handler so on_request_cb and resource_root
+    // are both active. Absolute asset paths (/assets/…) resolve correctly
+    // against the webview://app/ origin.
+    [wkwebview_ loadRequest:[NSURLRequest requestWithURL:
+        [NSURL URLWithString:@"webview://app/"]]];
 }
 
 void WebViewImpl::load_file(const std::string& path) {
     is_ipc_content_ = true;
     NSURL* fileUrl  = [NSURL fileURLWithPath:@(path.c_str())];
-    NSURL* dir      = [fileUrl URLByDeletingLastPathComponent];
-    [wkwebview_ loadFileURL:fileUrl allowingReadAccessToURL:dir];
+
+    // Derive resource root from the file's containing directory so that
+    // sibling assets (/assets/…) are resolved and served correctly.
+    resource_root_ = fileUrl.URLByDeletingLastPathComponent
+                              .path.UTF8String ?: "";
+
+    NSString* html = [NSString stringWithContentsOfURL:fileUrl
+                                              encoding:NSUTF8StringEncoding
+                                                 error:nil] ?: @"";
+    scheme_handler_.htmlContent = html;
+    [wkwebview_ loadRequest:[NSURLRequest requestWithURL:
+        [NSURL URLWithString:@"webview://app/"]]];
 }
 
-void WebViewImpl::reload()      { [wkwebview_ reload]; }
-void WebViewImpl::go_back()     { [wkwebview_ goBack]; }
-void WebViewImpl::go_forward()  { [wkwebview_ goForward]; }
+void WebViewImpl::reload()     { [wkwebview_ reload]; }
+void WebViewImpl::go_back()    { [wkwebview_ goBack]; }
+void WebViewImpl::go_forward() { [wkwebview_ goForward]; }
 
 std::string WebViewImpl::get_url() {
     return wkwebview_.URL.absoluteString.UTF8String ?: "";

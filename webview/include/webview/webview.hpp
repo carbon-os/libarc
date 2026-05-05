@@ -22,7 +22,8 @@
 namespace webview {
 
 struct WebViewConfig {
-    bool        devtools = false;
+    bool        devtools      = false;
+    std::string resource_root;               // absolute path, no trailing slash
     std::string webview2_user_data_path;
     std::string webview2_runtime_path;
 };
@@ -30,10 +31,6 @@ struct WebViewConfig {
 class WebViewImpl; // platform-private
 
 class WebView {
-    // !! impl_ is declared first so it is constructed first.
-    // C++ initialises non-static data members in declaration order regardless
-    // of access specifier.  ipc holds a raw pointer to impl_, so impl_ must
-    // be fully constructed before ipc's constructor runs.
     std::unique_ptr<WebViewImpl> impl_;
 
 public:
@@ -51,6 +48,9 @@ public:
     void        go_back();
     void        go_forward();
     std::string get_url();
+
+    // ── Resource root ────────────────────────────────────────────────────────
+    void set_resource_root(std::string path);
 
     // ── Lifecycle events ────────────────────────────────────────────────────
     void on_ready(std::function<void()> fn);
@@ -117,8 +117,6 @@ public:
     std::vector<std::string>    dialog_multi(FileDialog d);
 
     // ── IPC ──────────────────────────────────────────────────────────────────
-    // Declared after impl_ so it is constructed after impl_ and the raw
-    // pointer passed to IPC(impl_.get()) is valid.
     IPC ipc;
 };
 
